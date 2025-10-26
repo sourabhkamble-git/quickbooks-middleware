@@ -146,7 +146,7 @@ if (redirectTarget) {
   return res.send(`
     <html>
       <head>
-        <meta http-equiv="refresh" content="2;url=${redirectTarget}">
+        <meta http-equiv="refresh" content="2;url=${redirectTarget}?connected=true">
       </head>
       <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
         <h2>✅ QuickBooks connected successfully!</h2>
