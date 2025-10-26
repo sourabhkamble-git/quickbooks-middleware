@@ -206,4 +206,13 @@ app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
   }
 });
 
+app.get('/debug/connections', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM connections LIMIT 10');
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+});
+
 app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
