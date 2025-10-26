@@ -145,16 +145,17 @@ if (redirectTarget) {
   // Automatically redirect back to Salesforce Lightning page
   return res.send(`
     <html>
-      <head>
-        <meta http-equiv="refresh" content="2;url=${redirectTarget}?connected=true">
-      </head>
       <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
         <h2>✅ QuickBooks connected successfully!</h2>
-        <p>Redirecting you back to Salesforce...</p>
-        <p>If not redirected, <a href="${redirectTarget}">click here</a>.</p>
+        <p>Redirecting back to Salesforce...</p>
+        <script>
+          const redirectUrl = "${redirectTarget}${redirectTarget.includes('?') ? '&' : '?'}connected=true";
+          window.top.location.replace(redirectUrl);
+        </script>
       </body>
     </html>
   `);
+  
 } else {
   return res.send(`
     <html><body>
