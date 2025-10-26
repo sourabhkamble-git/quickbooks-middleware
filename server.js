@@ -140,6 +140,7 @@ const redirectScript = salesforceRedirect
 : `<p>No Salesforce redirect URL configured.</p>`;
 
 const redirectTarget = req.query.redirect || null;
+console.log('redirectTarget==>', redirectTarget);  
 
 if (redirectTarget) {
   // Automatically redirect back to Salesforce Lightning page
