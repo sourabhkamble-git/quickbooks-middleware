@@ -294,7 +294,7 @@ app.get('/api/quickbooks/:stateId/test', async (req, res) => {
     conn = refreshed || conn;
 
     // Example QuickBooks API call (Get Company Info)
-    const qbRes = await fetch(`https://quickbooks.api.intuit.com/v3/company/${conn.realm_id}/companyinfo/${conn.realm_id}`, {
+    const qbRes = await fetch(`https://sandbox-quickbooks.api.intuit.com/v3/company/${conn.realm_id}/companyinfo/${conn.realm_id}`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${conn.access_token}`,
