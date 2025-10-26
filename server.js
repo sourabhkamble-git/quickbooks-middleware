@@ -57,18 +57,25 @@ console.log(`Callback URL: ${CALLBACK_BASE}`);
 app.get('/', (req, res) => res.send('✅ QuickBooks Middleware is running on Render!'));
 
 // 1) Start OAuth: redirect user to QuickBooks authorize page
+
 app.get('/auth/quickbooks', (req, res) => {
-  const { state, redirect } = req.query;
-  // Save redirect URL temporarily for use in callback
-  oauthClient.authorizeUri = `${process.env.BASE_URL}/callback/quickbooks?state=${state}&redirect=${encodeURIComponent(redirect)}`;
+  const state = req.query.state;
+  const redirect = req.query.redirect ? encodeURIComponent(req.query.redirect) : null;
 
-  const authUri = oauthClient.authorizeUri({
-    state,
-    redirectUri: `${process.env.BASE_URL}/callback/quickbooks?state=${state}&redirect=${encodeURIComponent(redirect)}`
-  });
+  if (!state) return res.status(400).send('Missing state (connection request id).');
 
-  res.redirect(authUri);
+  // Build QuickBooks OAuth2 authorize URL (Intuit)
+  const redirectUri = encodeURIComponent(CALLBACK_BASE);
+  const scope = encodeURIComponent('com.intuit.quickbooks.accounting openid profile email');
+  const authUrl = `https://appcenter.intuit.com/connect/oauth2?client_id=${CLIENT_ID}&response_type=code&scope=${scope}&redirect_uri=${redirectUri}&state=${state}${redirect ? `&redirect=${redirect}` : ''}`;
+
+  console.log('🔗 Redirecting to QuickBooks with state:', state);
+  console.log('🔁 After auth, QuickBooks will call:', CALLBACK_BASE);
+  console.log('🌐 Returning redirect param:', redirect);
+
+  return res.redirect(authUrl);
 });
+
 
 
 // 2) Callback: QuickBooks will call this after user authorizes
