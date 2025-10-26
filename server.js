@@ -140,7 +140,8 @@ app.get('/callback/quickbooks', async (req, res) => {
     console.log(`🔁 Found redirectTarget for state=${state}:`, redirectTarget);
 
     if (redirectTarget) {
-      const vfRedirectUrl = `${redirectTarget}${redirectTarget.includes('?') ? '&' : '?'}qb_connected=true`;
+      //const vfRedirectUrl = `${redirectTarget}${redirectTarget.includes('?') ? '&' : '?'}qb_connected=true`;
+      const vfRedirectUrl = `${redirectTarget}#qb_connected=true`;
       console.log(`🔁 Redirecting to VF page: ${vfRedirectUrl}`);
       return res.redirect(vfRedirectUrl);
     } else {
