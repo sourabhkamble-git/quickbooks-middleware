@@ -127,11 +127,24 @@ app.get('/callback/quickbooks', async (req, res) => {
     }
 
     // Show a friendly page asking user to return to Salesforce
-    return res.send(`<html><body>
-      <h2>QuickBooks connected successfully ✅</h2>
-      <p>You can now return to Salesforce. If the page doesn't redirect automatically, click below.</p>
-      <p><a href="salesforce1://">Return to Salesforce</a></p>
-      </body></html>`);
+    // Replace this block inside your /callback/quickbooks handler
+const salesforceRedirect = process.env.SALESFORCE_REDIRECT_BASE
+? `${process.env.SALESFORCE_REDIRECT_BASE}/lightning/r/Connection_Request__c/${state}/view`
+: null;
+
+const redirectScript = salesforceRedirect
+? `<script>
+     setTimeout(() => { window.location.href = '${salesforceRedirect}'; }, 2000);
+   </script>
+   <p><a href="${salesforceRedirect}">Return to Salesforce</a></p>`
+: `<p>No Salesforce redirect URL configured.</p>`;
+
+return res.send(`<html><body style="font-family:sans-serif;text-align:center;margin-top:50px;">
+<h2>QuickBooks connected successfully ✅</h2>
+<p>You can now return to Salesforce. Redirecting in a few seconds...</p>
+${redirectScript}
+</body></html>`);
+
   } catch (err) {
     console.error(err);
     return res.status(500).send('Server error during token exchange');
