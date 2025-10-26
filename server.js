@@ -1,38 +1,196 @@
 // server.js
 const express = require('express');
+const fetch = require('node-fetch'); // npm i node-fetch@2
+const { Pool } = require('pg');       // npm i pg
 const app = express();
-const port = process.env.PORT || 3000;
-
 app.use(express.json());
 
-// Health check
-app.get('/', (req, res) => {
-  res.send('✅ QuickBooks Middleware is running on Render!');
-});
+const PORT = process.env.PORT || 3000;
 
-// Mock OAuth flow
+// Config from Render env vars (set these in Render)
+const CLIENT_ID = process.env.QUICKBOOKS_CLIENT_ID || 'REPLACE_ME';
+const CLIENT_SECRET = process.env.QUICKBOOKS_CLIENT_SECRET || 'REPLACE_ME';
+const CALLBACK_BASE = process.env.CALLBACK_URL || `https://yourapp.onrender.com/callback/quickbooks`;
+const BASE_URL = process.env.BASE_URL || 'https://yourapp.onrender.com'; // optional
+
+// Warn if placeholders
+if (CLIENT_ID === 'REPLACE_ME' || CLIENT_SECRET === 'REPLACE_ME') {
+  console.warn('WARNING: QUICKBOOKS_CLIENT_ID or QUICKBOOKS_CLIENT_SECRET is not set (using placeholder).');
+}
+
+// DB: use Postgres if DATABASE_URL is present, else in-memory
+let usePg = !!process.env.DATABASE_URL;
+let pool;
+let store = {}; // in-memory { stateId: { access_token, refresh_token, realmId, expires_at } }
+
+if (usePg) {
+  try {
+    pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }});
+    (async () => {
+      try {
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS connections (
+            state_id TEXT PRIMARY KEY,
+            access_token TEXT,
+            refresh_token TEXT,
+            realm_id TEXT,
+            expires_at TIMESTAMP
+          );
+        `);
+        console.log('Postgres connected and table ensured.');
+      } catch (err) {
+        console.error('Error creating connections table:', err);
+      }
+    })();
+  } catch (err) {
+    console.error('Failed to initialize Postgres pool:', err);
+    usePg = false;
+  }
+} else {
+  console.log('No DATABASE_URL found — using in-memory store (non-persistent).');
+}
+
+console.log(`Using storage: ${usePg ? 'Postgres' : 'In-memory'}`);
+console.log(`Callback URL: ${CALLBACK_BASE}`);
+
+// Quick test
+app.get('/', (req, res) => res.send('✅ QuickBooks Middleware is running on Render!'));
+
+// 1) Start OAuth: redirect user to QuickBooks authorize page
 app.get('/auth/quickbooks', (req, res) => {
-  res.send('Redirecting to QuickBooks OAuth (mock)');
+  const state = req.query.state;
+  if (!state) return res.status(400).send('Missing state (connection request id).');
+
+  // Build QuickBooks OAuth2 authorize URL (Intuit)
+  const redirectUri = encodeURIComponent(CALLBACK_BASE);
+  const scope = encodeURIComponent('com.intuit.quickbooks.accounting openid profile email');
+  const url = `https://appcenter.intuit.com/connect/oauth2?client_id=${CLIENT_ID}&response_type=code&scope=${scope}&redirect_uri=${redirectUri}&state=${state}`;
+  return res.redirect(url);
 });
 
-// Mock callback
-app.get('/callback/quickbooks', (req, res) => {
-  res.send('OAuth successful! (mock)');
+// 2) Callback: QuickBooks will call this after user authorizes
+app.get('/callback/quickbooks', async (req, res) => {
+  const { code, state, realmId, error, error_description } = req.query;
+  if (error) {
+    return res.status(400).send(`Auth error: ${error_description || error}`);
+  }
+  if (!code || !state) return res.status(400).send('Missing code/state');
+
+  // Exchange code for tokens
+  const tokenUrl = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
+  const basicAuth = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
+  const params = new URLSearchParams();
+  params.append('grant_type', 'authorization_code');
+  params.append('code', code);
+  params.append('redirect_uri', CALLBACK_BASE);
+
+  try {
+    const tokenRes = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${basicAuth}`,
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: params.toString()
+    });
+    const tokenJson = await tokenRes.json();
+    if (!tokenRes.ok) {
+      console.error('Token exchange failed', tokenJson);
+      return res.status(500).send('Token exchange failed.');
+    }
+
+    const access_token = tokenJson.access_token;
+    const refresh_token = tokenJson.refresh_token;
+    const expires_in = tokenJson.expires_in || 3600;
+    const expires_at = new Date(Date.now() + expires_in * 1000);
+
+    // store in DB keyed by state (state == ConnectionRequest record id from Salesforce)
+    if (usePg) {
+      try {
+        await pool.query(
+          `INSERT INTO connections(state_id, access_token, refresh_token, realm_id, expires_at)
+           VALUES($1,$2,$3,$4,$5)
+           ON CONFLICT(state_id) DO UPDATE
+             SET access_token = EXCLUDED.access_token,
+                 refresh_token = EXCLUDED.refresh_token,
+                 realm_id = EXCLUDED.realm_id,
+                 expires_at = EXCLUDED.expires_at;`,
+           [state, access_token, refresh_token, realmId, expires_at]
+        );
+      } catch (dbErr) {
+        console.error('DB insert/update failed:', dbErr);
+        return res.status(500).send('Server error storing tokens.');
+      }
+    } else {
+      store[state] = { access_token, refresh_token, realmId, expires_at };
+    }
+
+    // Show a friendly page asking user to return to Salesforce
+    return res.send(`<html><body>
+      <h2>QuickBooks connected successfully ✅</h2>
+      <p>You can now return to Salesforce. If the page doesn't redirect automatically, click below.</p>
+      <p><a href="salesforce1://">Return to Salesforce</a></p>
+      </body></html>`);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).send('Server error during token exchange');
+  }
 });
 
-// Mock QuickBooks data endpoint
-app.get('/api/quickbooks/customers', (req, res) => {
-  res.json([
-    { id: 1, name: 'Acme Corp', balance: 500 },
-    { id: 2, name: 'Beta Ltd', balance: 250 }
-  ]);
+// 3) Status endpoint for Salesforce to check whether connection is ready
+app.get('/status', async (req, res) => {
+  const state = req.query.state;
+  if (!state) return res.status(400).send({ ok: false, message: 'Missing state' });
+
+  if (usePg) {
+    try {
+      const dbRes = await pool.query('SELECT * FROM connections WHERE state_id=$1', [state]);
+      if (dbRes.rows.length === 0) return res.json({ ok: true, connected: false });
+      const r = dbRes.rows[0];
+      return res.json({ ok: true, connected: true, realmId: r.realm_id });
+    } catch (err) {
+      console.error('DB error on /status:', err);
+      return res.status(500).json({ ok: false, message: 'DB error' });
+    }
+  } else {
+    const entry = store[state];
+    if (!entry) return res.json({ ok: true, connected: false });
+    return res.json({ ok: true, connected: true, realmId: entry.realmId });
+  }
 });
 
-app.post('/api/quickbooks/customers', (req, res) => {
-  console.log('Received POST:', req.body);
-  res.json({ message: 'Customer created (mock)' });
+// Utility: find connection by realmId (example)
+async function findConnectionByRealmId(realmId) {
+  if (usePg) {
+    const dbRes = await pool.query('SELECT * FROM connections WHERE realm_id=$1 LIMIT 1', [realmId]);
+    if (dbRes.rows.length === 0) return null;
+    return dbRes.rows[0];
+  } else {
+    // search in-memory store
+    for (const [state, entry] of Object.entries(store)) {
+      if (entry.realmId === realmId) {
+        return { state_id: state, access_token: entry.access_token, refresh_token: entry.refresh_token, realm_id: entry.realmId, expires_at: entry.expires_at };
+      }
+    }
+    return null;
+  }
+}
+
+// 4) Example proxied API call (Salesforce will call this to create QuickBooks invoice/customer)
+app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
+  const realmId = req.params.realmId;
+  try {
+    const conn = await findConnectionByRealmId(realmId);
+    if (!conn) return res.status(404).json({ ok: false, message: 'No tokens found for realmId' });
+
+    // Example: call QuickBooks API with conn.access_token
+    // For POC, we return a mock success plus show token hint (DO NOT return tokens in production)
+    return res.json({ ok: true, message: 'Mock create customer accepted', body: req.body, usedRealmId: realmId });
+  } catch (err) {
+    console.error('Error in proxied API:', err);
+    return res.status(500).json({ ok: false, message: 'Server error' });
+  }
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
