@@ -173,6 +173,70 @@ app.get('/status', async (req, res) => {
   }
 });
 
+// Utility to refresh QuickBooks tokens when expired
+async function refreshQuickBooksToken(stateId) {
+  let conn;
+  if (usePg) {
+    const result = await pool.query('SELECT * FROM connections WHERE state_id=$1 LIMIT 1', [stateId]);
+    if (result.rows.length === 0) return null;
+    conn = result.rows[0];
+  } else {
+    conn = store[stateId];
+  }
+
+  const now = new Date();
+  const expiresAt = new Date(conn.expires_at);
+  if (expiresAt > now) {
+    // Token still valid
+    return conn;
+  }
+
+  console.log(`🔄 Access token expired for state=${stateId}, refreshing...`);
+
+  const tokenUrl = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
+  const basicAuth = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
+  const params = new URLSearchParams();
+  params.append('grant_type', 'refresh_token');
+  params.append('refresh_token', conn.refresh_token);
+
+  const res = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${basicAuth}`,
+      'Accept': 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: params.toString()
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    console.error('❌ Failed to refresh token', data);
+    return null;
+  }
+
+  const newAccess = data.access_token;
+  const newRefresh = data.refresh_token || conn.refresh_token;
+  const newExpires = new Date(Date.now() + (data.expires_in || 3600) * 1000);
+
+  if (usePg) {
+    await pool.query(
+      `UPDATE connections
+       SET access_token=$1, refresh_token=$2, expires_at=$3
+       WHERE state_id=$4`,
+      [newAccess, newRefresh, newExpires, stateId]
+    );
+  } else {
+    conn.access_token = newAccess;
+    conn.refresh_token = newRefresh;
+    conn.expires_at = newExpires;
+  }
+
+  console.log(`✅ Token refreshed for state=${stateId}`);
+  return { ...conn, access_token: newAccess, refresh_token: newRefresh, expires_at: newExpires };
+}
+
+
 // Utility: find connection by realmId (example)
 async function findConnectionByRealmId(realmId) {
   if (usePg) {
@@ -194,7 +258,12 @@ async function findConnectionByRealmId(realmId) {
 app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
   const realmId = req.params.realmId;
   try {
-    const conn = await findConnectionByRealmId(realmId);
+    let conn = await findConnectionByRealmId(realmId);
+    if (!conn) return res.status(404).json({ ok: false, message: 'No tokens found for realmId' });
+
+    // Automatically refresh if expired
+    const refreshed = await refreshQuickBooksToken(conn.state_id);
+    conn = refreshed || conn;
     if (!conn) return res.status(404).json({ ok: false, message: 'No tokens found for realmId' });
 
     // Example: call QuickBooks API with conn.access_token
@@ -205,6 +274,49 @@ app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
     return res.status(500).json({ ok: false, message: 'Server error' });
   }
 });
+
+// 5) Test QuickBooks API call (with auto token refresh)
+app.get('/api/quickbooks/:stateId/test', async (req, res) => {
+  const stateId = req.params.stateId;
+
+  try {
+    let conn;
+    if (usePg) {
+      const result = await pool.query('SELECT * FROM connections WHERE state_id=$1 LIMIT 1', [stateId]);
+      if (result.rows.length === 0) return res.status(404).json({ ok: false, message: 'No tokens found for this state' });
+      conn = result.rows[0];
+    } else {
+      conn = store[stateId];
+    }
+
+    // Ensure token is valid or refreshed
+    const refreshed = await refreshQuickBooksToken(stateId);
+    conn = refreshed || conn;
+
+    // Example QuickBooks API call (Get Company Info)
+    const qbRes = await fetch(`https://quickbooks.api.intuit.com/v3/company/${conn.realm_id}/companyinfo/${conn.realm_id}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${conn.access_token}`,
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = await qbRes.json();
+
+    if (!qbRes.ok) {
+      console.error('QuickBooks API failed:', data);
+      return res.status(500).json({ ok: false, message: 'QuickBooks API error', details: data });
+    }
+
+    return res.json({ ok: true, message: 'QuickBooks API call success', data });
+
+  } catch (err) {
+    console.error('Error in test API call:', err);
+    return res.status(500).json({ ok: false, message: err.message });
+  }
+});
+
 
 app.get('/debug/connections', async (req, res) => {
   try {
