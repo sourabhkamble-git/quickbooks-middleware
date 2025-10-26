@@ -61,29 +61,35 @@ app.get('/', (req, res) => res.send('✅ QuickBooks Middleware is running on Ren
 // Simple memory map (for demo — in prod, use Redis or DB)
 const redirectMap = new Map();
 
-// Step 1: Start OAuth
+// ---------------- AUTH START -----------------
 app.get('/auth/quickbooks', (req, res) => {
   const { state, redirect } = req.query;
   if (!state) return res.status(400).send('Missing state (connection request id).');
 
+  // ✅ Store the redirect target temporarily
   if (redirect) {
     redirectMap.set(state, decodeURIComponent(redirect));
-    console.log(`🧭 Saved redirect for state=${state}:`, decodeURIComponent(redirect));
+    console.log(`✅ Stored redirect for state=${state}:`, decodeURIComponent(redirect));
   }
 
   const redirectUri = encodeURIComponent(CALLBACK_BASE);
   const scope = encodeURIComponent('com.intuit.quickbooks.accounting openid profile email');
-  const url = `https://appcenter.intuit.com/connect/oauth2?client_id=${CLIENT_ID}&response_type=code&scope=${scope}&redirect_uri=${redirectUri}&state=${state}`;
-  return res.redirect(url);
+  const authUrl = `https://appcenter.intuit.com/connect/oauth2?client_id=${CLIENT_ID}&response_type=code&scope=${scope}&redirect_uri=${redirectUri}&state=${state}`;
+  return res.redirect(authUrl);
 });
+// ---------------- AUTH END -------------------
 
-// Step 2: Callback
+
+// ---------------- CALLBACK -------------------
 app.get('/callback/quickbooks', async (req, res) => {
   const { code, state, realmId, error, error_description } = req.query;
-  if (error) return res.status(400).send(`Auth error: ${error_description || error}`);
+
+  if (error) {
+    return res.status(400).send(`Auth error: ${error_description || error}`);
+  }
   if (!code || !state) return res.status(400).send('Missing code/state');
 
-  // Exchange code for token (same as before)
+  // Exchange code for tokens
   const tokenUrl = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
   const basicAuth = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
   const params = new URLSearchParams({
@@ -92,71 +98,74 @@ app.get('/callback/quickbooks', async (req, res) => {
     redirect_uri: CALLBACK_BASE,
   });
 
-  const tokenRes = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Basic ${basicAuth}`,
-      'Accept': 'application/json',
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: params.toString(),
-  });
+  try {
+    const tokenRes = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${basicAuth}`,
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    });
 
-  const tokenJson = await tokenRes.json();
-  if (!tokenRes.ok) {
-    console.error('Token exchange failed:', tokenJson);
-    return res.status(500).send('Token exchange failed.');
-  }
+    const tokenJson = await tokenRes.json();
+    if (!tokenRes.ok) {
+      console.error('❌ Token exchange failed', tokenJson);
+      return res.status(500).send('Token exchange failed.');
+    }
 
-  const { access_token, refresh_token, expires_in } = tokenJson;
-  const expires_at = new Date(Date.now() + (expires_in || 3600) * 1000);
+    const { access_token, refresh_token, expires_in } = tokenJson;
+    const expires_at = new Date(Date.now() + (expires_in || 3600) * 1000);
 
-  // Store tokens in DB (same logic as before)
-  if (usePg) {
-    await pool.query(
-      `INSERT INTO connections(state_id, access_token, refresh_token, realm_id, expires_at)
-       VALUES($1,$2,$3,$4,$5)
-       ON CONFLICT(state_id) DO UPDATE
-         SET access_token=EXCLUDED.access_token,
-             refresh_token=EXCLUDED.refresh_token,
-             realm_id=EXCLUDED.realm_id,
-             expires_at=EXCLUDED.expires_at`,
-      [state, access_token, refresh_token, realmId, expires_at]
-    );
-  } else {
-    store[state] = { access_token, refresh_token, realmId, expires_at };
-  }
+    // Store tokens
+    if (usePg) {
+      await pool.query(
+        `INSERT INTO connections(state_id, access_token, refresh_token, realm_id, expires_at)
+         VALUES($1,$2,$3,$4,$5)
+         ON CONFLICT(state_id) DO UPDATE
+           SET access_token=EXCLUDED.access_token,
+               refresh_token=EXCLUDED.refresh_token,
+               realm_id=EXCLUDED.realm_id,
+               expires_at=EXCLUDED.expires_at`,
+        [state, access_token, refresh_token, realmId, expires_at]
+      );
+    } else {
+      store[state] = { access_token, refresh_token, realmId, expires_at };
+    }
 
-  // ✅ Retrieve stored redirect target
-  const redirectTarget = redirectMap.get(state);
-  redirectMap.delete(state);
-  console.log('🔁 Redirect target found for state', state, ':', redirectTarget);
+    // ✅ Retrieve redirect target from map
+    const redirectTarget = redirectMap.get(state);
+    redirectMap.delete(state);
+    console.log(`🔁 Found redirectTarget for state=${state}:`, redirectTarget);
 
-  if (redirectTarget) {
-    // Redirect back to LWC page
-    return res.send(`
-      <html>
-        <body style="font-family: sans-serif; text-align:center; margin-top:50px;">
-          <h2>✅ QuickBooks connected successfully!</h2>
-          <p>Redirecting back to Salesforce...</p>
-          <script>
-            const redirectUrl = "${redirectTarget}${redirectTarget.includes('?') ? '&' : '?'}connected=true";
-            window.top.location.replace(redirectUrl);
-          </script>
-        </body>
-      </html>
-    `);
-  } else {
-    // Fallback for missing redirect
-    return res.send(`
-      <html>
-        <body>
-          <h2>QuickBooks connected successfully ✅</h2>
-          <p>You can now return to Salesforce manually.</p>
-          <p><a href="salesforce1://">Return to Salesforce</a></p>
-        </body>
-      </html>
-    `);
+    if (redirectTarget) {
+      return res.send(`
+        <html>
+          <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+            <h2>✅ QuickBooks connected successfully!</h2>
+            <p>Redirecting back to Salesforce...</p>
+            <script>
+              const redirectUrl = "${redirectTarget}${redirectTarget.includes('?') ? '&' : '?'}connected=true";
+              window.top.location.replace(redirectUrl);
+            </script>
+          </body>
+        </html>
+      `);
+    } else {
+      return res.send(`
+        <html>
+          <body>
+            <h2>QuickBooks connected successfully ✅</h2>
+            <p>You can now return to Salesforce manually.</p>
+            <p><a href="https://login.salesforce.com">Return to Salesforce</a></p>
+          </body>
+        </html>
+      `);
+    }
+  } catch (err) {
+    console.error('❌ Callback error:', err);
+    return res.status(500).send('Server error during token exchange');
   }
 });
 
