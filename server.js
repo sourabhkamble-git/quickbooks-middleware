@@ -317,6 +317,87 @@ app.get('/api/quickbooks/:stateId/test', async (req, res) => {
   }
 });
 
+// 🔄 Test QuickBooks API call (auto refresh if needed)
+app.get('/api/test/:stateId', async (req, res) => {
+  const stateId = req.params.stateId;
+
+  try {
+    // Step 1: Find connection by state
+    let conn;
+    if (usePg) {
+      const dbRes = await pool.query('SELECT * FROM connections WHERE state_id=$1', [stateId]);
+      if (dbRes.rows.length === 0) return res.status(404).json({ ok: false, message: 'No connection found' });
+      conn = dbRes.rows[0];
+    } else {
+      conn = store[stateId];
+      if (!conn) return res.status(404).json({ ok: false, message: 'No connection found' });
+    }
+
+    // Step 2: Check expiration
+    const expiresAt = new Date(conn.expires_at);
+    if (Date.now() > expiresAt.getTime()) {
+      console.log('Access token expired, refreshing...');
+      const tokenUrl = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
+      const basicAuth = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
+      const params = new URLSearchParams();
+      params.append('grant_type', 'refresh_token');
+      params.append('refresh_token', conn.refresh_token);
+
+      const refreshRes = await fetch(tokenUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${basicAuth}`,
+          'Accept': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: params.toString()
+      });
+
+      const newTokens = await refreshRes.json();
+      if (!refreshRes.ok) {
+        console.error('Failed to refresh token', newTokens);
+        return res.status(500).json({ ok: false, message: 'Token refresh failed', details: newTokens });
+      }
+
+      // Update DB
+      const newExpiresAt = new Date(Date.now() + (newTokens.expires_in || 3600) * 1000);
+      if (usePg) {
+        await pool.query(
+          `UPDATE connections SET access_token=$1, refresh_token=$2, expires_at=$3 WHERE state_id=$4`,
+          [newTokens.access_token, newTokens.refresh_token, newExpiresAt, stateId]
+        );
+      } else {
+        conn.access_token = newTokens.access_token;
+        conn.refresh_token = newTokens.refresh_token;
+        conn.expires_at = newExpiresAt;
+      }
+
+      conn.access_token = newTokens.access_token;
+    }
+
+    // Step 3: Call QuickBooks API (CompanyInfo)
+    const apiUrl = `https://sandbox-quickbooks.api.intuit.com/v3/company/${conn.realm_id}/companyinfo/${conn.realm_id}`;
+    const qbRes = await fetch(apiUrl, {
+      headers: {
+        'Authorization': `Bearer ${conn.access_token}`,
+        'Accept': 'application/json'
+      }
+    });
+
+    const qbJson = await qbRes.json();
+    if (!qbRes.ok) {
+      console.error('QuickBooks API error', qbJson);
+      return res.status(500).json({ ok: false, message: 'QuickBooks API error', details: qbJson });
+    }
+
+    res.json({ ok: true, companyInfo: qbJson });
+  } catch (err) {
+    console.error('Test API call failed:', err);
+    res.status(500).json({ ok: false, message: 'Internal Server Error', details: err.message });
+  }
+});
+
+
 
 app.get('/debug/connections', async (req, res) => {
   try {
