@@ -140,19 +140,9 @@ app.get('/callback/quickbooks', async (req, res) => {
     console.log(`🔁 Found redirectTarget for state=${state}:`, redirectTarget);
 
     if (redirectTarget) {
-      return res.send(`
-        <html>
-          <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
-            <h2>✅ QuickBooks connected successfully!</h2>
-            <p>Redirecting back to Salesforce...</p>
-            <script>
-              sessionStorage.setItem('qb_connected', 'true');
-              const redirectUrl = "${redirectTarget}${redirectTarget.includes('?') ? '&' : '?'}connected=true";
-              window.top.location.replace(redirectUrl);
-            </script>
-          </body>
-        </html>
-      `);
+      const vfRedirectUrl = `${redirectTarget}${redirectTarget.includes('?') ? '&' : '?'}qb_connected=true`;
+      console.log(`🔁 Redirecting to VF page: ${vfRedirectUrl}`);
+      return res.redirect(vfRedirectUrl);
     } else {
       return res.send(`
         <html>
