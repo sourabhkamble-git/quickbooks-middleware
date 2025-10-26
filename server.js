@@ -58,129 +58,108 @@ app.get('/', (req, res) => res.send('✅ QuickBooks Middleware is running on Ren
 
 // 1) Start OAuth: redirect user to QuickBooks authorize page
 
-app.get('/auth/quickbooks', (req, res) => {
-  const state = req.query.state;
-  const redirect = req.query.redirect ? encodeURIComponent(req.query.redirect) : null;
+// Simple memory map (for demo — in prod, use Redis or DB)
+const redirectMap = new Map();
 
+// Step 1: Start OAuth
+app.get('/auth/quickbooks', (req, res) => {
+  const { state, redirect } = req.query;
   if (!state) return res.status(400).send('Missing state (connection request id).');
 
-  // Build QuickBooks OAuth2 authorize URL (Intuit)
+  if (redirect) {
+    redirectMap.set(state, decodeURIComponent(redirect));
+    console.log(`🧭 Saved redirect for state=${state}:`, decodeURIComponent(redirect));
+  }
+
   const redirectUri = encodeURIComponent(CALLBACK_BASE);
   const scope = encodeURIComponent('com.intuit.quickbooks.accounting openid profile email');
-  const authUrl = `https://appcenter.intuit.com/connect/oauth2?client_id=${CLIENT_ID}&response_type=code&scope=${scope}&redirect_uri=${redirectUri}&state=${state}${redirect ? `&redirect=${redirect}` : ''}`;
-
-  console.log('🔗 Redirecting to QuickBooks with state:', state);
-  console.log('🔁 After auth, QuickBooks will call:', CALLBACK_BASE);
-  console.log('🌐 Returning redirect param:', redirect);
-
-  return res.redirect(authUrl);
+  const url = `https://appcenter.intuit.com/connect/oauth2?client_id=${CLIENT_ID}&response_type=code&scope=${scope}&redirect_uri=${redirectUri}&state=${state}`;
+  return res.redirect(url);
 });
 
-
-
-// 2) Callback: QuickBooks will call this after user authorizes
+// Step 2: Callback
 app.get('/callback/quickbooks', async (req, res) => {
-  const { code, state, realmId, error, error_description, redirect } = req.query;
+  const { code, state, realmId, error, error_description } = req.query;
+  if (error) return res.status(400).send(`Auth error: ${error_description || error}`);
+  if (!code || !state) return res.status(400).send('Missing code/state');
 
-  // Handle any OAuth errors first
-  if (error) {
-    console.error('OAuth error from QuickBooks:', error_description || error);
-    return res.status(400).send(`Auth error: ${error_description || error}`);
-  }
-
-  if (!code || !state) {
-    return res.status(400).send('Missing code or state');
-  }
-
-  // Decode redirectTarget safely
-  const redirectTarget = redirect ? decodeURIComponent(redirect) : null;
-  console.log('📍 Callback received for state:', state);
-  console.log('🔗 Redirect target:', redirectTarget);
-
-  // Exchange code for tokens
+  // Exchange code for token (same as before)
   const tokenUrl = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
   const basicAuth = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
-  const params = new URLSearchParams();
-  params.append('grant_type', 'authorization_code');
-  params.append('code', code);
-  params.append('redirect_uri', CALLBACK_BASE);
+  const params = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: CALLBACK_BASE,
+  });
 
-  try {
-    const tokenRes = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${basicAuth}`,
-        'Accept': 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: params.toString()
-    });
+  const tokenRes = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${basicAuth}`,
+      'Accept': 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: params.toString(),
+  });
 
-    const tokenJson = await tokenRes.json();
-    if (!tokenRes.ok) {
-      console.error('❌ Token exchange failed:', tokenJson);
-      return res.status(500).send('Token exchange failed.');
-    }
+  const tokenJson = await tokenRes.json();
+  if (!tokenRes.ok) {
+    console.error('Token exchange failed:', tokenJson);
+    return res.status(500).send('Token exchange failed.');
+  }
 
-    const access_token = tokenJson.access_token;
-    const refresh_token = tokenJson.refresh_token;
-    const expires_in = tokenJson.expires_in || 3600;
-    const expires_at = new Date(Date.now() + expires_in * 1000);
+  const { access_token, refresh_token, expires_in } = tokenJson;
+  const expires_at = new Date(Date.now() + (expires_in || 3600) * 1000);
 
-    // Store tokens in DB or in-memory store
-    if (usePg) {
-      try {
-        await pool.query(
-          `INSERT INTO connections(state_id, access_token, refresh_token, realm_id, expires_at)
-           VALUES($1, $2, $3, $4, $5)
-           ON CONFLICT(state_id) DO UPDATE
-             SET access_token = EXCLUDED.access_token,
-                 refresh_token = EXCLUDED.refresh_token,
-                 realm_id = EXCLUDED.realm_id,
-                 expires_at = EXCLUDED.expires_at;`,
-          [state, access_token, refresh_token, realmId, expires_at]
-        );
-        console.log(`✅ Tokens saved for state=${state}`);
-      } catch (dbErr) {
-        console.error('DB insert/update failed:', dbErr);
-        return res.status(500).send('Server error storing tokens.');
-      }
-    } else {
-      store[state] = { access_token, refresh_token, realmId, expires_at };
-    }
+  // Store tokens in DB (same logic as before)
+  if (usePg) {
+    await pool.query(
+      `INSERT INTO connections(state_id, access_token, refresh_token, realm_id, expires_at)
+       VALUES($1,$2,$3,$4,$5)
+       ON CONFLICT(state_id) DO UPDATE
+         SET access_token=EXCLUDED.access_token,
+             refresh_token=EXCLUDED.refresh_token,
+             realm_id=EXCLUDED.realm_id,
+             expires_at=EXCLUDED.expires_at`,
+      [state, access_token, refresh_token, realmId, expires_at]
+    );
+  } else {
+    store[state] = { access_token, refresh_token, realmId, expires_at };
+  }
 
-    // ✅ Redirect Logic
-    if (redirectTarget) {
-      // Redirect back to Salesforce Lightning page where your LWC lives
-      console.log('➡️ Redirecting user back to Salesforce:', redirectTarget);
-      return res.send(`
-        <html>
-          <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
-            <h2>✅ QuickBooks connected successfully!</h2>
-            <p>Redirecting back to Salesforce...</p>
-            <script>
-              const redirectUrl = "${redirectTarget}${redirectTarget.includes('?') ? '&' : '?'}connected=true";
-              window.top.location.replace(redirectUrl);
-            </script>
-          </body>
-        </html>
-      `);
-    } else {
-      // Fallback if redirect not provided
-      return res.send(`
-        <html><body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+  // ✅ Retrieve stored redirect target
+  const redirectTarget = redirectMap.get(state);
+  redirectMap.delete(state);
+  console.log('🔁 Redirect target found for state', state, ':', redirectTarget);
+
+  if (redirectTarget) {
+    // Redirect back to LWC page
+    return res.send(`
+      <html>
+        <body style="font-family: sans-serif; text-align:center; margin-top:50px;">
+          <h2>✅ QuickBooks connected successfully!</h2>
+          <p>Redirecting back to Salesforce...</p>
+          <script>
+            const redirectUrl = "${redirectTarget}${redirectTarget.includes('?') ? '&' : '?'}connected=true";
+            window.top.location.replace(redirectUrl);
+          </script>
+        </body>
+      </html>
+    `);
+  } else {
+    // Fallback for missing redirect
+    return res.send(`
+      <html>
+        <body>
           <h2>QuickBooks connected successfully ✅</h2>
-          <p>You can now return to Salesforce.</p>
+          <p>You can now return to Salesforce manually.</p>
           <p><a href="salesforce1://">Return to Salesforce</a></p>
-        </body></html>
-      `);
-    }
-
-  } catch (err) {
-    console.error('❌ Error during QuickBooks callback:', err);
-    return res.status(500).send('Server error during token exchange');
+        </body>
+      </html>
+    `);
   }
 });
+
 
 
 // 3) Status endpoint for Salesforce to check whether connection is ready
