@@ -139,11 +139,32 @@ const redirectScript = salesforceRedirect
    <p><a href="${salesforceRedirect}">Return to Salesforce</a></p>`
 : `<p>No Salesforce redirect URL configured.</p>`;
 
-return res.send(`<html><body style="font-family:sans-serif;text-align:center;margin-top:50px;">
-<h2>QuickBooks connected successfully ✅</h2>
-<p>You can now return to Salesforce. Redirecting in a few seconds...</p>
-${redirectScript}
-</body></html>`);
+const redirectTarget = req.query.redirect || null;
+
+if (redirectTarget) {
+  // Automatically redirect back to Salesforce Lightning page
+  return res.send(`
+    <html>
+      <head>
+        <meta http-equiv="refresh" content="2;url=${redirectTarget}">
+      </head>
+      <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+        <h2>✅ QuickBooks connected successfully!</h2>
+        <p>Redirecting you back to Salesforce...</p>
+        <p>If not redirected, <a href="${redirectTarget}">click here</a>.</p>
+      </body>
+    </html>
+  `);
+} else {
+  return res.send(`
+    <html><body>
+      <h2>QuickBooks connected successfully ✅</h2>
+      <p>You can now return to Salesforce. If the page doesn't redirect automatically, click below.</p>
+      <p><a href="salesforce1://">Return to Salesforce</a></p>
+    </body></html>
+  `);
+}
+
 
   } catch (err) {
     console.error(err);
