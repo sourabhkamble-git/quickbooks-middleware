@@ -146,6 +146,7 @@ app.get('/callback/quickbooks', async (req, res) => {
             <h2>✅ QuickBooks connected successfully!</h2>
             <p>Redirecting back to Salesforce...</p>
             <script>
+              sessionStorage.setItem('qb_connected', 'true');
               const redirectUrl = "${redirectTarget}${redirectTarget.includes('?') ? '&' : '?'}connected=true";
               window.top.location.replace(redirectUrl);
             </script>
