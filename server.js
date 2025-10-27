@@ -270,6 +270,7 @@ async function findConnectionByRealmId(realmId) {
 app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
   const realmId = req.params.realmId;
   try {
+    // Find connection by realmId
     let conn = await findConnectionByRealmId(realmId);
     if (!conn) return res.status(404).json({ ok: false, message: 'No tokens found for realmId' });
 
@@ -278,12 +279,33 @@ app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
     conn = refreshed || conn;
     if (!conn) return res.status(404).json({ ok: false, message: 'No tokens found for realmId' });
 
-    // Example: call QuickBooks API with conn.access_token
-    // For POC, we return a mock success plus show token hint (DO NOT return tokens in production)
-    return res.json({ ok: true, message: 'Mock create customer accepted', body: req.body, usedRealmId: realmId });
+    // Build QuickBooks Customer payload from request body
+    const customerData = req.body;
+    
+    // Call QuickBooks API to create customer
+    const qbRes = await fetch(`https://sandbox-quickbooks.api.intuit.com/v3/company/${realmId}/customer`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${conn.access_token}`,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(customerData)
+    });
+
+    const result = await qbRes.json();
+
+    if (!qbRes.ok) {
+      console.error('QuickBooks API error creating customer:', result);
+      return res.status(qbRes.status).json({ ok: false, message: 'QuickBooks API error', details: result });
+    }
+
+    console.log('✅ Customer created in QuickBooks:', result.QueryResponse?.Customer?.[0]?.Id);
+    return res.json({ ok: true, message: 'Customer created successfully', data: result });
+    
   } catch (err) {
-    console.error('Error in proxied API:', err);
-    return res.status(500).json({ ok: false, message: 'Server error' });
+    console.error('Error creating QuickBooks customer:', err);
+    return res.status(500).json({ ok: false, message: 'Server error: ' + err.message });
   }
 });
 
