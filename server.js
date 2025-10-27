@@ -272,15 +272,39 @@ app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
   try {
     // Find connection by realmId
     let conn = await findConnectionByRealmId(realmId);
-    if (!conn) return res.status(404).json({ ok: false, message: 'No tokens found for realmId' });
+    if (!conn) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'CONNECTION_NOT_FOUND',
+        message: 'No QuickBooks connection found for this realm ID',
+        details: 'Please ensure your QuickBooks account is properly connected'
+      });
+    }
 
     // Automatically refresh if expired
     const refreshed = await refreshQuickBooksToken(conn.state_id);
     conn = refreshed || conn;
-    if (!conn) return res.status(404).json({ ok: false, message: 'No tokens found for realmId' });
+    if (!conn) {
+      return res.status(401).json({ 
+        ok: false, 
+        error: 'TOKEN_EXPIRED',
+        message: 'QuickBooks connection has expired',
+        details: 'Please reconnect your QuickBooks account'
+      });
+    }
 
     // Build QuickBooks Customer payload from request body
     const customerData = req.body;
+    
+    // Validate required fields
+    if (!customerData.DisplayName) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'INVALID_DATA',
+        message: 'Customer DisplayName is required',
+        details: 'Please provide a valid customer name'
+      });
+    }
     
     // Call QuickBooks API to create customer
     const qbRes = await fetch(`https://sandbox-quickbooks.api.intuit.com/v3/company/${realmId}/customer`, {
@@ -297,15 +321,31 @@ app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
 
     if (!qbRes.ok) {
       console.error('QuickBooks API error creating customer:', result);
-      return res.status(qbRes.status).json({ ok: false, message: 'QuickBooks API error', details: result });
+      return res.status(qbRes.status).json({ 
+        ok: false, 
+        error: 'QUICKBOOKS_API_ERROR',
+        message: 'QuickBooks API returned an error',
+        details: result.Fault ? result.Fault.Error[0].Detail : 'Unknown QuickBooks error',
+        quickbooksError: result
+      });
     }
 
     console.log('✅ Customer created in QuickBooks:', result.QueryResponse?.Customer?.[0]?.Id);
-    return res.json({ ok: true, message: 'Customer created successfully', data: result });
+    return res.json({ 
+      ok: true, 
+      message: 'Customer created successfully', 
+      customerId: result.QueryResponse?.Customer?.[0]?.Id,
+      data: result 
+    });
     
   } catch (err) {
     console.error('Error creating QuickBooks customer:', err);
-    return res.status(500).json({ ok: false, message: 'Server error: ' + err.message });
+    return res.status(500).json({ 
+      ok: false, 
+      error: 'SERVER_ERROR',
+      message: 'Internal server error occurred',
+      details: err.message 
+    });
   }
 });
 
