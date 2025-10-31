@@ -535,31 +535,37 @@ app.post('/api/slack/channels/:teamId/messages', async (req, res) => {
     
     // Find Slack connection by team ID
     let conn;
+    let accessToken;
+    
     if (usePg) {
       const result = await pool.query('SELECT * FROM connections WHERE team_id=$1 AND service_type=$2 LIMIT 1', [teamId, 'slack']);
-      if (result.rows.length === 0) {
-        return res.status(404).json({ 
-          ok: false, 
-          error: 'CONNECTION_NOT_FOUND',
-          message: 'No Slack connection found for this team',
-          details: 'Please ensure your Slack workspace is properly connected'
-        });
+      if (result.rows.length > 0) {
+        conn = result.rows[0];
+        accessToken = conn.access_token;
       }
-      conn = result.rows[0];
     } else {
       // Search in-memory store
       for (const [state, entry] of Object.entries(store)) {
         if (entry.teamId === teamId && entry.serviceType === 'slack') {
           conn = { state_id: state, access_token: entry.access_token, refresh_token: entry.refresh_token, realm_id: entry.realmId, expires_at: entry.expires_at, service_type: entry.serviceType, team_id: entry.teamId, team_name: entry.teamName };
+          accessToken = conn.access_token;
           break;
         }
       }
-      if (!conn) {
+    }
+    
+    // Fallback to global SLACK_BOT_TOKEN if no connection found (for POC testing)
+    if (!accessToken) {
+      const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+      if (SLACK_BOT_TOKEN) {
+        accessToken = SLACK_BOT_TOKEN;
+        console.log('⚠️ Using global SLACK_BOT_TOKEN (no connection found for team ' + teamId + ')');
+      } else {
         return res.status(404).json({ 
           ok: false, 
           error: 'CONNECTION_NOT_FOUND',
           message: 'No Slack connection found for this team',
-          details: 'Please ensure your Slack workspace is properly connected'
+          details: 'Please connect your Slack workspace or set SLACK_BOT_TOKEN environment variable'
         });
       }
     }
@@ -576,11 +582,11 @@ app.post('/api/slack/channels/:teamId/messages', async (req, res) => {
       delete slackPayload.blocks;
     }
     
-    // Call Slack Web API to post message using stored access token
+    // Call Slack Web API to post message
     const slackRes = await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${conn.access_token}`,
+        'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(slackPayload)
@@ -699,6 +705,54 @@ app.get('/api/test/:stateId', async (req, res) => {
 });
 
 
+
+// ⚠️ TESTING ONLY: Manually insert Slack token (for POC testing without full OAuth)
+app.post('/api/test/slack-connection', async (req, res) => {
+  const { stateId, teamId, accessToken, channelId } = req.body;
+  
+  if (!stateId || !teamId || !accessToken) {
+    return res.status(400).json({ 
+      ok: false, 
+      error: 'Missing required fields',
+      message: 'Requires: stateId, teamId, accessToken'
+    });
+  }
+  
+  try {
+    const expires_at = new Date(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000); // 100 years
+    
+    if (usePg) {
+      await pool.query(
+        `INSERT INTO connections(state_id, access_token, refresh_token, realm_id, expires_at, service_type, team_id, team_name)
+         VALUES($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT(state_id) DO UPDATE
+           SET access_token=EXCLUDED.access_token,
+               realm_id=EXCLUDED.realm_id,
+               service_type=EXCLUDED.service_type,
+               team_id=EXCLUDED.team_id`,
+        [stateId, accessToken, '', channelId || '', expires_at, 'slack', teamId, 'Manual Test']
+      );
+    } else {
+      store[stateId] = { access_token: accessToken, refresh_token: '', realmId: channelId || '', expires_at, serviceType: 'slack', teamId, teamName: 'Manual Test' };
+    }
+    
+    return res.json({ 
+      ok: true, 
+      message: 'Slack connection stored successfully',
+      stateId: stateId,
+      teamId: teamId
+    });
+    
+  } catch (err) {
+    console.error('Error storing Slack connection:', err);
+    return res.status(500).json({ 
+      ok: false, 
+      error: 'SERVER_ERROR',
+      message: 'Failed to store connection',
+      details: err.message 
+    });
+  }
+});
 
 app.get('/debug/connections', async (req, res) => {
   try {
