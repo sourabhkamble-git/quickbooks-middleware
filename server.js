@@ -35,6 +35,7 @@ if (usePg) {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }});
     (async () => {
       try {
+        // Create table if it doesn't exist
         await pool.query(`
           CREATE TABLE IF NOT EXISTS connections (
             state_id TEXT PRIMARY KEY,
@@ -47,6 +48,28 @@ if (usePg) {
             team_name TEXT
           );
         `);
+        
+        // Add new columns to existing table if they don't exist
+        await pool.query(`
+          DO $$ 
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                          WHERE table_name='connections' AND column_name='service_type') THEN
+              ALTER TABLE connections ADD COLUMN service_type TEXT DEFAULT 'quickbooks';
+            END IF;
+            
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                          WHERE table_name='connections' AND column_name='team_id') THEN
+              ALTER TABLE connections ADD COLUMN team_id TEXT;
+            END IF;
+            
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                          WHERE table_name='connections' AND column_name='team_name') THEN
+              ALTER TABLE connections ADD COLUMN team_name TEXT;
+            END IF;
+          END $$;
+        `);
+        
         console.log('Postgres connected and table ensured.');
       } catch (err) {
         console.error('Error creating connections table:', err);
