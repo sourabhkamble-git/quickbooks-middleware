@@ -13,9 +13,16 @@ const CLIENT_SECRET = process.env.QUICKBOOKS_CLIENT_SECRET || 'REPLACE_ME';
 const CALLBACK_BASE = process.env.CALLBACK_URL || `https://yourapp.onrender.com/callback/quickbooks`;
 const BASE_URL = process.env.BASE_URL || 'https://yourapp.onrender.com'; // optional
 
+// Slack OAuth credentials
+const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || 'REPLACE_ME';
+const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || 'REPLACE_ME';
+
 // Warn if placeholders
 if (CLIENT_ID === 'REPLACE_ME' || CLIENT_SECRET === 'REPLACE_ME') {
   console.warn('WARNING: QUICKBOOKS_CLIENT_ID or QUICKBOOKS_CLIENT_SECRET is not set (using placeholder).');
+}
+if (SLACK_CLIENT_ID === 'REPLACE_ME' || SLACK_CLIENT_SECRET === 'REPLACE_ME') {
+  console.warn('WARNING: SLACK_CLIENT_ID or SLACK_CLIENT_SECRET is not set (using placeholder).');
 }
 
 // DB: use Postgres if DATABASE_URL is present, else in-memory
@@ -34,7 +41,10 @@ if (usePg) {
             access_token TEXT,
             refresh_token TEXT,
             realm_id TEXT,
-            expires_at TIMESTAMP
+            expires_at TIMESTAMP,
+            service_type TEXT DEFAULT 'quickbooks',
+            team_id TEXT,
+            team_name TEXT
           );
         `);
         console.log('Postgres connected and table ensured.');
@@ -161,7 +171,110 @@ app.get('/callback/quickbooks', async (req, res) => {
   }
 });
 
+// ============ SLACK OAUTH FLOW ============
 
+// 1) Start Slack OAuth: redirect user to Slack authorize page
+app.get('/auth/slack', (req, res) => {
+  const { state, redirect } = req.query;
+  if (!state) return res.status(400).send('Missing state (connection request id).');
+
+  // Store the redirect target temporarily
+  if (redirect) {
+    redirectMap.set(state, decodeURIComponent(redirect));
+    console.log(`✅ Stored Slack redirect for state=${state}:`, decodeURIComponent(redirect));
+  }
+
+  const redirectUri = encodeURIComponent(`${CALLBACK_BASE}/slack`);
+  const scope = 'chat:write,channels:read,channels:join';
+  const authUrl = `https://slack.com/oauth/v2/authorize?client_id=${SLACK_CLIENT_ID}&scope=${encodeURIComponent(scope)}&redirect_uri=${redirectUri}&state=${state}`;
+  return res.redirect(authUrl);
+});
+
+// 2) Slack OAuth callback
+app.get('/callback/slack', async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+
+  if (error) {
+    return res.status(400).send(`Slack auth error: ${error_description || error}`);
+  }
+  if (!code || !state) return res.status(400).send('Missing code/state');
+
+  // Exchange code for tokens
+  const tokenUrl = 'https://slack.com/api/oauth.v2.access';
+  const params = new URLSearchParams({
+    code,
+    client_id: SLACK_CLIENT_ID,
+    client_secret: SLACK_CLIENT_SECRET,
+    redirect_uri: `${CALLBACK_BASE}/slack`
+  });
+
+  try {
+    const tokenRes = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: params.toString()
+    });
+
+    const tokenJson = await tokenRes.json();
+    if (!tokenRes.ok || !tokenJson.ok) {
+      console.error('❌ Slack token exchange failed', tokenJson);
+      return res.status(500).send('Slack token exchange failed.');
+    }
+
+    const { access_token, team, bot_user_id } = tokenJson.authed_user || tokenJson;
+    const teamId = team?.id;
+    const teamName = team?.name;
+    
+    // For Slack, access_token doesn't expire (unless revoked)
+    const expires_at = new Date(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000); // 100 years in the future
+
+    // Store tokens
+    if (usePg) {
+      await pool.query(
+        `INSERT INTO connections(state_id, access_token, refresh_token, realm_id, expires_at, service_type, team_id, team_name)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT(state_id) DO UPDATE
+           SET access_token=EXCLUDED.access_token,
+               refresh_token=EXCLUDED.refresh_token,
+               realm_id=EXCLUDED.realm_id,
+               expires_at=EXCLUDED.expires_at,
+               service_type=EXCLUDED.service_type,
+               team_id=EXCLUDED.team_id,
+               team_name=EXCLUDED.team_name`,
+        [state, access_token, '', teamId, expires_at, 'slack', teamId, teamName]
+      );
+    } else {
+      store[state] = { access_token, refresh_token: '', realmId: teamId, expires_at, serviceType: 'slack', teamId, teamName };
+    }
+
+    // Retrieve redirect target from map
+    const redirectTarget = redirectMap.get(state);
+    redirectMap.delete(state);
+    console.log(`🔁 Found Slack redirectTarget for state=${state}:`, redirectTarget);
+
+    if (redirectTarget) {
+      const vfRedirectUrl = `${redirectTarget}#slack_connected=true&state=${encodeURIComponent(state)}`;
+      console.log(`🔁 Redirecting to VF page: ${vfRedirectUrl}`);
+      return res.redirect(vfRedirectUrl);
+    } else {
+      return res.send(`
+        <html>
+          <body>
+            <h2>Slack connected successfully ✅</h2>
+            <p>Team: ${teamName}</p>
+            <p>You can now return to Salesforce manually.</p>
+            <p><a href="https://login.salesforce.com">Return to Salesforce</a></p>
+          </body>
+        </html>
+      `);
+    }
+  } catch (err) {
+    console.error('❌ Slack callback error:', err);
+    return res.status(500).send('Server error during Slack token exchange');
+  }
+});
 
 // 3) Status endpoint for Salesforce to check whether connection is ready
 app.get('/status', async (req, res) => {
@@ -266,7 +379,7 @@ async function findConnectionByRealmId(realmId) {
   }
 }
 
-// 4) Example proxied API call (Salesforce will call this to create QuickBooks invoice/customer)
+// 4) Create QuickBooks Customer API call (Salesforce will call this to create QuickBooks customer)
 app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
   const realmId = req.params.realmId;
   try {
@@ -388,6 +501,120 @@ app.get('/api/quickbooks/:stateId/test', async (req, res) => {
   } catch (err) {
     console.error('Error in test API call:', err);
     return res.status(500).json({ ok: false, message: err.message });
+  }
+});
+
+// ============ SLACK ENDPOINTS ============
+
+// Send message to Slack channel
+app.post('/api/slack/channels/:teamId/messages', async (req, res) => {
+  const teamId = req.params.teamId;
+  
+  try {
+    const messageData = req.body;
+    const channelId = messageData.channel; // Channel ID passed in body
+    
+    // Validate required fields
+    if (!messageData.text && !messageData.blocks) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'INVALID_DATA',
+        message: 'Message text or blocks are required',
+        details: 'Please provide either a text message or message blocks'
+      });
+    }
+    
+    if (!channelId) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'INVALID_DATA',
+        message: 'Channel ID is required',
+        details: 'Please provide a channel ID in the message data'
+      });
+    }
+    
+    // Find Slack connection by team ID
+    let conn;
+    if (usePg) {
+      const result = await pool.query('SELECT * FROM connections WHERE team_id=$1 AND service_type=$2 LIMIT 1', [teamId, 'slack']);
+      if (result.rows.length === 0) {
+        return res.status(404).json({ 
+          ok: false, 
+          error: 'CONNECTION_NOT_FOUND',
+          message: 'No Slack connection found for this team',
+          details: 'Please ensure your Slack workspace is properly connected'
+        });
+      }
+      conn = result.rows[0];
+    } else {
+      // Search in-memory store
+      for (const [state, entry] of Object.entries(store)) {
+        if (entry.teamId === teamId && entry.serviceType === 'slack') {
+          conn = { state_id: state, access_token: entry.access_token, refresh_token: entry.refresh_token, realm_id: entry.realmId, expires_at: entry.expires_at, service_type: entry.serviceType, team_id: entry.teamId, team_name: entry.teamName };
+          break;
+        }
+      }
+      if (!conn) {
+        return res.status(404).json({ 
+          ok: false, 
+          error: 'CONNECTION_NOT_FOUND',
+          message: 'No Slack connection found for this team',
+          details: 'Please ensure your Slack workspace is properly connected'
+        });
+      }
+    }
+    
+    // Build Slack message payload
+    const slackPayload = {
+      channel: channelId,
+      text: messageData.text || 'New message from Salesforce',
+      blocks: messageData.blocks || undefined
+    };
+    
+    // Remove undefined blocks if not provided
+    if (!slackPayload.blocks) {
+      delete slackPayload.blocks;
+    }
+    
+    // Call Slack Web API to post message using stored access token
+    const slackRes = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${conn.access_token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(slackPayload)
+    });
+    
+    const result = await slackRes.json();
+    
+    if (!result.ok) {
+      console.error('Slack API error:', result);
+      return res.status(slackRes.status).json({ 
+        ok: false, 
+        error: 'SLACK_API_ERROR',
+        message: 'Slack API returned an error',
+        details: result.error || 'Unknown Slack error',
+        slackError: result
+      });
+    }
+    
+    console.log('✅ Message sent to Slack:', result.ts);
+    return res.json({ 
+      ok: true, 
+      message: 'Message sent successfully', 
+      ts: result.ts,
+      data: result 
+    });
+    
+  } catch (err) {
+    console.error('Error sending Slack message:', err);
+    return res.status(500).json({ 
+      ok: false, 
+      error: 'SERVER_ERROR',
+      message: 'Internal server error occurred',
+      details: err.message 
+    });
   }
 });
 
