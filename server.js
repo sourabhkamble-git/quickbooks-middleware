@@ -10,8 +10,9 @@ const PORT = process.env.PORT || 3000;
 // Config from Render env vars (set these in Render)
 const CLIENT_ID = process.env.QUICKBOOKS_CLIENT_ID || 'REPLACE_ME';
 const CLIENT_SECRET = process.env.QUICKBOOKS_CLIENT_SECRET || 'REPLACE_ME';
-const CALLBACK_BASE = process.env.CALLBACK_URL || `https://yourapp.onrender.com/callback/quickbooks`;
-const BASE_URL = process.env.BASE_URL || 'https://yourapp.onrender.com'; // optional
+const BASE_URL = process.env.BASE_URL || process.env.CALLBACK_URL || 'https://yourapp.onrender.com';
+const QB_CALLBACK_URL = process.env.CALLBACK_URL || `${BASE_URL}/callback/quickbooks`;
+const SLACK_CALLBACK_URL = `${BASE_URL}/callback/slack`;
 
 // Slack OAuth credentials
 const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || 'REPLACE_ME';
@@ -84,7 +85,8 @@ if (usePg) {
 }
 
 console.log(`Using storage: ${usePg ? 'Postgres' : 'In-memory'}`);
-console.log(`Callback URL: ${CALLBACK_BASE}`);
+console.log(`QB Callback URL: ${QB_CALLBACK_URL}`);
+console.log(`Slack Callback URL: ${SLACK_CALLBACK_URL}`);
 
 // Quick test
 app.get('/', (req, res) => res.send('✅ QuickBooks Middleware is running on Render!'));
@@ -105,7 +107,7 @@ app.get('/auth/quickbooks', (req, res) => {
     console.log(`✅ Stored redirect for state=${state}:`, decodeURIComponent(redirect));
   }
 
-  const redirectUri = encodeURIComponent(CALLBACK_BASE);
+  const redirectUri = encodeURIComponent(QB_CALLBACK_URL);
   const scope = encodeURIComponent('com.intuit.quickbooks.accounting openid profile email');
   const authUrl = `https://appcenter.intuit.com/connect/oauth2?client_id=${CLIENT_ID}&response_type=code&scope=${scope}&redirect_uri=${redirectUri}&state=${state}`;
   return res.redirect(authUrl);
@@ -128,7 +130,7 @@ app.get('/callback/quickbooks', async (req, res) => {
   const params = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
-    redirect_uri: CALLBACK_BASE,
+    redirect_uri: QB_CALLBACK_URL,
   });
 
   try {
@@ -207,7 +209,7 @@ app.get('/auth/slack', (req, res) => {
     console.log(`✅ Stored Slack redirect for state=${state}:`, decodeURIComponent(redirect));
   }
 
-  const redirectUri = encodeURIComponent(`${CALLBACK_BASE}/slack`);
+  const redirectUri = encodeURIComponent(SLACK_CALLBACK_URL);
   const scope = 'chat:write,channels:read,channels:join';
   const authUrl = `https://slack.com/oauth/v2/authorize?client_id=${SLACK_CLIENT_ID}&scope=${encodeURIComponent(scope)}&redirect_uri=${redirectUri}&state=${state}`;
   return res.redirect(authUrl);
@@ -228,7 +230,7 @@ app.get('/callback/slack', async (req, res) => {
     code,
     client_id: SLACK_CLIENT_ID,
     client_secret: SLACK_CLIENT_SECRET,
-    redirect_uri: `${CALLBACK_BASE}/slack`
+    redirect_uri: SLACK_CALLBACK_URL
   });
 
   try {
