@@ -10,7 +10,15 @@ const PORT = process.env.PORT || 3000;
 // Config from Render env vars (set these in Render)
 const CLIENT_ID = process.env.QUICKBOOKS_CLIENT_ID || 'REPLACE_ME';
 const CLIENT_SECRET = process.env.QUICKBOOKS_CLIENT_SECRET || 'REPLACE_ME';
-const BASE_URL = process.env.BASE_URL || process.env.CALLBACK_URL || 'https://yourapp.onrender.com';
+// Handle BASE_URL logic: if CALLBACK_URL is set, extract base URL from it
+let BASE_URL = process.env.BASE_URL;
+if (!BASE_URL && process.env.CALLBACK_URL) {
+  // Extract base URL from CALLBACK_URL (remove /callback/quickbooks suffix)
+  BASE_URL = process.env.CALLBACK_URL.replace(/\/callback\/quickbooks$/, '');
+}
+if (!BASE_URL) {
+  BASE_URL = 'https://quickbooks-middleware.onrender.com';
+}
 const QB_CALLBACK_URL = process.env.CALLBACK_URL || `${BASE_URL}/callback/quickbooks`;
 const SLACK_CALLBACK_URL = `${BASE_URL}/callback/slack`;
 
