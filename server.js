@@ -309,7 +309,14 @@ app.get('/status', async (req, res) => {
       const dbRes = await pool.query('SELECT * FROM connections WHERE state_id=$1', [state]);
       if (dbRes.rows.length === 0) return res.json({ ok: true, connected: false });
       const r = dbRes.rows[0];
-      return res.json({ ok: true, connected: true, realmId: r.realm_id });
+      return res.json({ 
+        ok: true, 
+        connected: true, 
+        realmId: r.realm_id,
+        serviceType: r.service_type,
+        teamId: r.team_id,
+        teamName: r.team_name
+      });
     } catch (err) {
       console.error('DB error on /status:', err);
       return res.status(500).json({ ok: false, message: 'DB error' });
@@ -317,7 +324,14 @@ app.get('/status', async (req, res) => {
   } else {
     const entry = store[state];
     if (!entry) return res.json({ ok: true, connected: false });
-    return res.json({ ok: true, connected: true, realmId: entry.realmId });
+    return res.json({ 
+      ok: true, 
+      connected: true, 
+      realmId: entry.realmId,
+      serviceType: entry.serviceType,
+      teamId: entry.teamId,
+      teamName: entry.teamName
+    });
   }
 });
 
