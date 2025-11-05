@@ -490,16 +490,12 @@ app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
       });
     }
 
-    // QuickBooks returns the customer in result.Customer (not QueryResponse)
-    const customerId = result.Customer?.Id;
-    console.log('✅ Customer created in QuickBooks:', customerId);
-    console.log('Full QuickBooks response:', JSON.stringify(result));
-    
+    console.log('✅ Customer created in QuickBooks:', result.QueryResponse?.Customer?.[0]?.Id);
     return res.json({ 
       ok: true, 
       message: 'Customer created successfully', 
-      customerId: customerId,
-      Customer: result.Customer // Return full customer object for Apex to parse
+      customerId: result.QueryResponse?.Customer?.[0]?.Id,
+      data: result 
     });
     
   } catch (err) {
