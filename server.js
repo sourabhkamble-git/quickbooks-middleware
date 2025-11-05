@@ -509,6 +509,92 @@ app.post('/api/quickbooks/:realmId/customers', async (req, res) => {
   }
 });
 
+// 4.5) Create QuickBooks Item (Product)
+app.post('/api/quickbooks/:realmId/items', async (req, res) => {
+  const realmId = req.params.realmId;
+  try {
+    // Find connection by realmId
+    let conn = await findConnectionByRealmId(realmId);
+    if (!conn) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'CONNECTION_NOT_FOUND',
+        message: 'No QuickBooks connection found for this realm ID'
+      });
+    }
+
+    // Automatically refresh if expired
+    const refreshed = await refreshQuickBooksToken(conn.state_id);
+    conn = refreshed || conn;
+    if (!conn) {
+      return res.status(401).json({ 
+        ok: false, 
+        error: 'TOKEN_EXPIRED',
+        message: 'QuickBooks connection has expired'
+      });
+    }
+
+    // Build QuickBooks Item payload from request body
+    const itemData = req.body;
+    
+    // Validate required fields
+    if (!itemData.Name) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'INVALID_DATA',
+        message: 'Item Name is required'
+      });
+    }
+    
+    console.log('Creating QuickBooks Item:', JSON.stringify(itemData));
+    
+    // Call QuickBooks API to create item
+    const qbRes = await fetch(`https://sandbox-quickbooks.api.intuit.com/v3/company/${realmId}/item`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${conn.access_token}`,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(itemData)
+    });
+
+    const result = await qbRes.json();
+
+    if (!qbRes.ok) {
+      console.error('QuickBooks API error creating item:', result);
+      return res.status(qbRes.status).json({ 
+        ok: false, 
+        error: 'QUICKBOOKS_API_ERROR',
+        message: 'QuickBooks API returned an error',
+        details: result.Fault ? result.Fault.Error[0].Detail : 'Unknown QuickBooks error',
+        quickbooksError: result
+      });
+    }
+
+    // QuickBooks returns the item in result.Item
+    const itemId = result.Item?.Id;
+    console.log('✅ Item created in QuickBooks:', itemId);
+    console.log('Full QuickBooks response:', JSON.stringify(result));
+    
+    return res.json({ 
+      ok: true, 
+      message: 'Item created successfully', 
+      itemId: itemId,
+      data: result // Return full response including Item object
+    });
+    
+  } catch (err) {
+    console.error('Error creating QuickBooks item:', err);
+    return res.status(500).json({ 
+      ok: false, 
+      error: 'SERVER_ERROR',
+      message: 'Internal server error occurred',
+      details: err.message 
+    });
+  }
+});
+
 // 5) Test QuickBooks API call (with auto token refresh)
 app.get('/api/quickbooks/:stateId/test', async (req, res) => {
   const stateId = req.params.stateId;
