@@ -810,4 +810,48 @@ app.get('/debug/connections', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ 
+    ok: false, 
+    error: 'SERVER_ERROR',
+    message: 'Internal server error',
+    details: err.message 
+  });
+});
+
+// Start server
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server started successfully!`);
+  console.log(`📡 Listening on port ${PORT}`);
+  console.log(`🔗 Base URL: ${BASE_URL}`);
+  console.log(`💾 Database: ${usePg ? 'PostgreSQL' : 'In-Memory'}`);
+  console.log(`🔑 QuickBooks: ${CLIENT_ID !== 'REPLACE_ME' ? 'Configured' : 'NOT CONFIGURED'}`);
+  console.log(`💬 Slack: ${SLACK_CLIENT_ID !== 'REPLACE_ME' ? 'Configured' : 'NOT CONFIGURED'}`);
+});
+
+// Handle server errors
+server.on('error', (error) => {
+  console.error('❌ Server error:', error);
+  if (error.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use`);
+  }
+  process.exit(1);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  server.close(() => {
+    console.log('HTTP server closed');
+    if (pool) {
+      pool.end(() => {
+        console.log('Database pool closed');
+        process.exit(0);
+      });
+    } else {
+      process.exit(0);
+    }
+  });
+});
